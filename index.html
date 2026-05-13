@@ -309,6 +309,15 @@ textarea{resize:vertical;min-height:72px;}
   <div class="max-w-sm">
     <span class="badge badge-cyan">JOIN</span>
     <h1 style="font-size:44px;margin:.5rem 0;">ENTER THE CODE</h1>
+    <!-- v5.73: rejoin card — shown if a recent player session exists in localStorage -->
+    <div id="player-last-session" style="display:none;background:rgba(0,234,255,.07);border:1px solid rgba(0,234,255,.35);border-radius:10px;padding:.9rem;margin:1rem 0;text-align:left;">
+      <div style="font-size:11px;color:var(--cyan);font-weight:700;letter-spacing:.1em;margin-bottom:6px;">🔄 RESUME YOUR LAST GAME</div>
+      <div style="font-size:13px;color:var(--txt);margin-bottom:8px;"><span id="player-last-name" style="font-weight:600;"></span> · room <span id="player-last-code" style="font-family:'DM Mono',monospace;color:var(--cyan);"></span></div>
+      <div style="display:flex;gap:.5rem;">
+        <button id="player-quick-restore" class="btn btn-cyan" style="flex:1;font-size:13px;padding:.55rem;">→ REJOIN NOW</button>
+        <button class="btn-ghost" style="font-size:11px;padding:.55rem .75rem;" onclick="clearPlayerSession()">Forget</button>
+      </div>
+    </div>
     <div style="display:flex;flex-direction:column;gap:.9rem;margin-bottom:1.25rem;margin-top:1.25rem;">
       <div><label style="font-size:12px;color:var(--mut);display:block;margin-bottom:5px;">Room code</label>
       <input id="join-code" type="text" placeholder="FLUTE-1234" maxlength="10" style="text-transform:uppercase;font-family:'DM Mono',monospace;font-size:20px;text-align:center;letter-spacing:.15em;" oninput="this.value=this.value.toUpperCase()"/></div>
@@ -1033,7 +1042,7 @@ textarea{resize:vertical;min-height:72px;}
 //     Ctrl+Shift+R once to pick up the new SHIP_VERSION constant, after
 //     which the script redirects to ?v=531 and stays current automatically.
 (function(){
-  var SHIP_VERSION='571';
+  var SHIP_VERSION='573';
   try{
     var url=new URL(window.location.href);
     if(url.searchParams.get('v')!==SHIP_VERSION){
@@ -1154,7 +1163,7 @@ const CHALLENGES={
          mustInclude:'A clock or globe',
          constraint:'Your give a shit meter',
          bonus:'Two clocks in different timezones — one of them is judging the other',
-         stamps:['clock','timezones','globe','heart','heart-break','meter','x-mark','swipe-right','swipe-left'],
+         stamps:['clock','timezones','globe','heart','heart-break','meter','x-mark','swipe-right','swipe-left','eyes-judging','eyes-skeptical','eyes-smug','eyes-roll','eyes-sideye','eyes-cyclops','eyes-disappointed','eyes-tired','coffee','headphones','youre-on-mute'],
          snippets:[]},
         {step:'TASK 2 of 2',title:"AVIN'S FLOWCHART",time:90,
          question:'"Who is on your level?"',
@@ -1513,6 +1522,29 @@ window.addEventListener('popstate',function(e){
 // Initial pushState so popstate has a base entry
 window.addEventListener('load',function(){
   try{history.pushState({},'',window.location.href);}catch(e){}
+  // v5.73: try to auto-rejoin if there's a recent player session. Falls back
+  // silently to the welcome screen on any failure (no session, expired, room
+  // gone, player removed, etc).
+  try{
+    if(typeof tryAutoRejoinPlayer==='function'){
+      tryAutoRejoinPlayer().catch(e=>console.error('auto-rejoin:',e));
+    }
+  }catch(e){}
+});
+// v5.73: surface silent Firebase failures. Most writes don't have .catch()
+// handlers (32 of them) — if any throw, the user would never know. This
+// catches unhandled rejections globally and notifies if it looks Firebase-ish.
+// Doesn't replace per-call handling but ensures players see SOMETHING.
+window.addEventListener('unhandledrejection',function(ev){
+  try{
+    const m=String(ev.reason&&(ev.reason.message||ev.reason)||'');
+    if(/permission_denied|network|firebase|offline|disconnect/i.test(m)){
+      console.error('[firebase unhandled]:',m);
+      if(typeof notify==='function')notify('⚠️ Network blip — your last action may not have saved. Try again.');
+    } else {
+      console.error('[unhandled rejection]:',m);
+    }
+  }catch(e){}
 });
 
 
@@ -2468,6 +2500,84 @@ function clearHostSession(){
   try{localStorage.removeItem('shipit_host_session');localStorage.removeItem('shipit_player_session');}catch(e){}
   notify('Saved game forgotten. Starting fresh!');
   populateHostSessionCard();
+}
+// v5.73: player rejoin parity with the host. Show a "RESUME YOUR LAST GAME"
+// card on the join screen when a recent session is in localStorage. Plus an
+// auto-rejoin attempt on page load for the most common case: someone refreshes
+// or comes back after being kicked out.
+function populatePlayerSessionCard(){
+  try{
+    const raw=localStorage.getItem('shipit_player_session');
+    const card=document.getElementById('player-last-session');
+    const nameEl=document.getElementById('player-last-name');
+    const codeEl=document.getElementById('player-last-code');
+    const btn=document.getElementById('player-quick-restore');
+    if(!raw||!card){if(card)card.style.display='none';return;}
+    const sess=JSON.parse(raw);
+    // Same 4-hour window as host
+    if(Date.now()-sess.ts>4*60*60*1000){
+      localStorage.removeItem('shipit_player_session');
+      card.style.display='none';return;
+    }
+    if(!sess.code||!sess.name){card.style.display='none';return;}
+    if(nameEl)nameEl.textContent=sess.name;
+    if(codeEl)codeEl.textContent=sess.code;
+    card.style.display='block';
+    if(btn)btn.onclick=()=>{
+      // Pre-fill the form fields, then trigger normal join lookup —
+      // joinLookup already has the resume-existing-player branch.
+      document.getElementById('join-code').value=sess.code;
+      document.getElementById('player-name').value=sess.name;
+      joinLookup();
+    };
+  }catch(e){console.error('populatePlayerSessionCard:',e);}
+}
+function clearPlayerSession(){
+  try{localStorage.removeItem('shipit_player_session');}catch(e){}
+  populatePlayerSessionCard();
+  notify('Last game forgotten.');
+}
+// v5.73: auto-rejoin entry point — called from window.load. If a fresh session
+// exists and the room is still live, skip the welcome screen entirely and
+// resume. Falls back silently to normal flow on any failure.
+async function tryAutoRejoinPlayer(){
+  try{
+    const raw=localStorage.getItem('shipit_player_session');
+    if(!raw)return false;
+    const sess=JSON.parse(raw);
+    if(!sess||!sess.code||!sess.name)return false;
+    // 4-hour window — same as host
+    if(Date.now()-sess.ts>4*60*60*1000){
+      localStorage.removeItem('shipit_player_session');return false;
+    }
+    // Skip auto-rejoin if a host session is also active — host takes precedence
+    if(localStorage.getItem('shipit_host_session'))return false;
+    initFirebase();
+    const room=await getRoomAsync(sess.code);
+    if(!room)return false;
+    // Player must still be in the team roster
+    const teamsArr=Object.values(room.teams||{});
+    const myTeam=teamsArr.find(t=>(t.players||[]).includes(sess.name));
+    if(!myTeam)return false;
+    // Wire up player state and route to current round
+    S.playerName=sess.name;S.roomCode=sess.code;S.teamId=myTeam.id;
+    S.roleId=(myTeam.roles||{})[sess.name]||'';
+    S.myColor=TEAMS.find(t=>t.id===myTeam.id)?.color||'#00e5ff';
+    // Refresh session timestamp
+    try{localStorage.setItem('shipit_player_session',JSON.stringify({
+      code:sess.code,name:sess.name,teamId:myTeam.id,roleId:S.roleId,ts:Date.now()
+    }));}catch(e){}
+    if(room.round>=1){
+      routeByRound(room.round,room);
+    } else {
+      renderLobbyMembers(room);go('s-lobby');
+    }
+    notify('Welcome back, '+sess.name+'!');
+    return true;
+  } catch(e){
+    console.error('auto-rejoin failed:',e);
+    return false;
+  }
 }
 function notify(msg){const el=document.getElementById('notif');el.textContent=msg;el.style.display='block';setTimeout(()=>el.style.display='none',2800);}
 function initials(n){return String(n).split(' ').map(w=>w[0]).join('').toUpperCase().slice(0,2);}
@@ -7488,6 +7598,14 @@ function hostTallyAndAdvance(){
   if(!room)return;
   const phase=room.bonusVotePhase;
   if(!phase)return;
+  // v5.73 IDEMPOTENCY GUARD: a double-click (network glitch, button held) would
+  // award +5 twice. Once we begin tallying a phase, mark it in firebase. If we
+  // see the marker, no-op.
+  if((room.bonusTallied||{})[phase]){
+    notify('Already tallied — skipping double-count.');
+    return;
+  }
+  DB.ref('shipit/rooms/'+S.roomCode+'/bonusTallied/'+phase).set(true);
   const phaseVotes=(room.bonusVotes||{})[phase]||{};
   const tallies={};
   Object.values(phaseVotes).forEach(tid=>{tallies[tid]=(tallies[tid]||0)+1;});
@@ -8328,6 +8446,31 @@ function renderHostDash(){
     const leaderPicks=t.leaderPicks||{};
     const answers=t.answers||{};
     let statusHtml='';
+    // v5.73: compute a per-team "X/Y submitted" summary for challenge rounds.
+    // The host needs to see at a glance who's done in each breakout room.
+    let summaryHtml='';
+    if(round>=2 && round<=6 && curRoleKey){
+      const _subKey=curRoleKey;
+      const _subs=extractSubs((t.answers||{})[_subKey]);
+      const _submittedSet=new Set(_subs.map(s=>s.playerName).filter(Boolean));
+      const _expectedNames=players.filter(p=>roles[p]!=='leader');
+      const _doneCount=_expectedNames.filter(p=>_submittedSet.has(p)).length;
+      const _total=_expectedNames.length;
+      const _allIn=_doneCount===_total && _total>0;
+      const _color=_allIn?'var(--grn)':(_doneCount>0?'var(--gold)':'var(--mut)');
+      const _icon=_allIn?'✅':(_doneCount>0?'📝':'⏳');
+      summaryHtml=`<div style="font-size:13px;font-weight:700;color:${_color};margin-bottom:6px;font-family:'DM Mono',monospace;">${_icon} ${_doneCount}/${_total} submitted</div>`;
+    } else if(round===7){
+      const _subs=extractSubs((t.answers||{}).shipping);
+      const _submittedSet=new Set(_subs.map(s=>s.playerName).filter(Boolean));
+      const _expectedNames=players.filter(p=>roles[p]!=='leader');
+      const _doneCount=_expectedNames.filter(p=>_submittedSet.has(p)).length;
+      const _total=_expectedNames.length;
+      const _allIn=_doneCount===_total && _total>0;
+      const _color=_allIn?'var(--grn)':(_doneCount>0?'var(--gold)':'var(--mut)');
+      const _icon=_allIn?'✅':(_doneCount>0?'📦':'⏳');
+      summaryHtml=`<div style="font-size:13px;font-weight:700;color:${_color};margin-bottom:6px;font-family:'DM Mono',monospace;">${_icon} ${_doneCount}/${_total} shipped</div>`;
+    }
     if(round===1){
       statusHtml=prod?`<span style="color:var(--grn);font-size:12px;">✅ ${prod.emoji} ${prod.name}</span>`:`<span style="color:var(--mut);font-size:12px;">⏳ Picking...</span>`;
     } else if(curRoleKey){
@@ -8355,6 +8498,7 @@ function renderHostDash(){
         <div style="font-family:'DM Mono',monospace;font-size:12px;color:${t.color};">${t.score||0} pts</div>
       </div>
       <div style="font-size:11px;color:var(--mut);margin-bottom:4px;">${players.length} players${prod?' · '+prod.name:''}</div>
+      ${summaryHtml}
       ${decisionHtml}
       <div>${statusHtml}</div>
       ${(()=>{
